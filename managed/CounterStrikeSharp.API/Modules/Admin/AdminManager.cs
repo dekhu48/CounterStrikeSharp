@@ -1,73 +1,96 @@
 ﻿using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Text.Json.Serialization;
 using System.Text.Json;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Utils;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Commands;
-using System.Linq;
 using System.Reflection;
 
 namespace CounterStrikeSharp.API.Modules.Admin
 {
     public partial class AdminData
     {
-        [JsonPropertyName("auth_type")] public string AuthType { get; set; }
-        [JsonPropertyName("identity")] public string Identity { get; set; }
-        [JsonPropertyName("flags")] public List<string> Flags { get; set; }
+        [JsonPropertyName("identity")] public required string Identity { get; init; }
+        [JsonPropertyName("flags")] public required HashSet<string> Flags { get; init; }
     }
 
     public static class AdminManager
     {
-        // ulong == SteamID.SteamId64
-        private static Dictionary<ulong, AdminData> _admins;
+        private static readonly Dictionary<SteamID, AdminData> Admins = new();
 
         static AdminManager()
         {
-            _admins = new Dictionary<ulong, AdminData>();
             CommandUtils.AddStandaloneCommand("css_admins_reload", "Reloads the admin file.", ReloadAdminsCommand);
+            CommandUtils.AddStandaloneCommand("css_admins_list", "List admins and their flags.", ListAdminsCommand);
         }
 
         [PermissionHelper("can_reload_admins")]
         [CommandHelper(whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
         private static void ReloadAdminsCommand(CCSPlayerController? player, CommandInfo command)
         {
-            _admins.Clear();
+            Admins.Clear();
             var rootDir = new FileInfo(Assembly.GetExecutingAssembly().Location).Directory.Parent;
             Load(Path.Combine(rootDir.FullName, "configs", "admins.json"));
+        }
+        
+        [PermissionHelper("can_reload_admins")]
+        [CommandHelper(whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+        private static void ListAdminsCommand(CCSPlayerController? player, CommandInfo command)
+        {
+            foreach (var (steamId, data) in Admins)
+            {
+                command.ReplyToCommand($"{steamId.SteamId64}, {steamId.SteamId2} - {string.Join(", ", data.Flags)}");
+            }
         }
 
         public static void Load(string adminDataPath)
         {
             try
             {
-                var adminsFromFile = JsonSerializer.Deserialize<Dictionary<string, AdminData>>(File.ReadAllText(adminDataPath));
-                if (adminsFromFile == null) { throw new FileNotFoundException(); }
-                foreach (var adminDef in adminsFromFile.Values)
+                if (!File.Exists(adminDataPath))
                 {
-                    var authType = adminDef.AuthType;
-                    var steamidFromFile = (authType == "steamid64") ? new SteamID(ulong.Parse(adminDef.Identity)) : new SteamID(adminDef.Identity);
-                    _admins.Add(steamidFromFile.SteamId64, adminDef);
+                    Console.WriteLine("Admin data file not found. Skipping admin data load.");
+                    return;
+                }
+                
+                var adminsFromFile = JsonSerializer.Deserialize<AdminData[]>(File.ReadAllText(adminDataPath));
+                if (adminsFromFile == null) { throw new FileNotFoundException(); }
+                foreach (var adminDef in adminsFromFile)
+                {
+                    if (SteamID.TryParse(adminDef.Identity, out var steamId))
+                    {
+                        if (Admins.ContainsKey(steamId!))
+                        {
+                            Admins[steamId!].Flags.UnionWith(adminDef.Flags);
+                        }
+                        else
+                        {
+                            Admins.Add(steamId!, adminDef);
+                        }
+                    }
                 }
 
-                Console.WriteLine($"Loaded admin data with {_admins.Count} admins.");
+                Console.WriteLine($"Loaded admin data with {Admins.Count} admins.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to load admin data: {ex.ToString()}");
+                Console.WriteLine($"Failed to load admin data: {ex}");
             }
         }
 
         /// <summary>
         /// Grabs the admin data for a player that was loaded from "configs/admins.json".
         /// </summary>
-        /// <param name="steamid">SteamID object of the player.</param>
+        /// <param name="steamId">SteamID object of the player.</param>
         /// <returns>AdminData class if data found, null if not.</returns>
-        public static AdminData? GetPlayerAdminData(SteamID steamid)
+        public static AdminData? GetPlayerAdminData(SteamID steamId)
         {
-            return _admins.GetValueOrDefault(steamid.SteamId64);
+            return Admins.GetValueOrDefault(steamId);
         }
 
         /// <summary>
@@ -82,24 +105,20 @@ namespace CounterStrikeSharp.API.Modules.Admin
             // The server console should have access to all commands, regardless of permissions.
             if (player == null) return true;
             if (!player.IsValid || player.Connected != PlayerConnectedState.PlayerConnected || player.IsBot) { return false; }
-            var data = GetPlayerAdminData(new SteamID(player.SteamID));
-            if (data == null) return false;
-
-            return data.Flags.Intersect(flags).Count() == flags.Count();
+            var playerData = GetPlayerAdminData((SteamID)player.SteamID);
+            return playerData?.Flags.IsSupersetOf(flags) ?? false;
         }
 
         /// <summary>
         /// Checks to see if a player has access to a certain set of permission flags.
         /// </summary>
-        /// <param name="steamid">Steam ID object.</param>
+        /// <param name="steamId">Steam ID object.</param>
         /// <param name="flags">Flags to look for in the players permission flags.</param>
         /// <returns>True if flags are present, false if not.</returns>
-        public static bool PlayerHasPermissions(SteamID steamid, params string[] flags)
+        public static bool PlayerHasPermissions(SteamID steamId, params string[] flags)
         {
-            var data = GetPlayerAdminData(steamid);
-            if (data == null) return false;
-
-            return data.Flags.Intersect(flags).Count() == flags.Count();
+            var playerData = GetPlayerAdminData(steamId);
+            return playerData?.Flags.IsSupersetOf(flags) ?? false;
         }
         
         /// <summary>
@@ -113,26 +132,23 @@ namespace CounterStrikeSharp.API.Modules.Admin
             if (player == null) return;
             if (!player.IsValid || player.Connected != PlayerConnectedState.PlayerConnected || player.IsBot) return;
 
-            var steamID = new SteamID(player.SteamID);
-            var data = GetPlayerAdminData(steamID);
+            var steamId = new SteamID(player.SteamID);
+            var data = GetPlayerAdminData(steamId);
             if (data == null)
             {
-                data = new AdminData();
-                data.Flags = new List<string>();
-                data.Flags.AddRange(flags);
+                data = new AdminData()
+                {
+                    Identity = steamId.SteamId64.ToString(),
+                    Flags = new(flags)
+                };
 
-                data.AuthType = "steamid64";
-                data.Identity = steamID.SteamId64.ToString();
-
-                _admins[steamID.SteamId64] = data;
+                Admins[steamId] = data;
                 return;
             }
-            else
+            
+            foreach (var flag in flags)
             {
-                foreach (var flag in flags)
-                {
-                    if (!data.Flags.Contains(flag)) data.Flags.Add(flag);
-                }
+                data.Flags.Add(flag);
             }
         }
 
@@ -149,10 +165,8 @@ namespace CounterStrikeSharp.API.Modules.Admin
 
             var data = GetPlayerAdminData(new SteamID(player.SteamID));
             if (data == null) return;
-            foreach (var flag in flags)
-            {
-                if (data.Flags.Contains(flag)) data.Flags.Remove(flag);
-            }
+            
+            data.Flags.ExceptWith(flags);
         }
 
         /// <summary>
@@ -164,19 +178,16 @@ namespace CounterStrikeSharp.API.Modules.Admin
             if (player == null) return;
             if (!player.IsValid || player.Connected != PlayerConnectedState.PlayerConnected || player.IsBot) return;
 
-            var steamID = new SteamID(player.SteamID);
-            if (_admins.ContainsKey(steamID.SteamId64)) _admins.Remove(steamID.SteamId64);
-            return;
+            RemovePlayerAdminData((SteamID)player.SteamID);
         }
 
         /// <summary>
         /// Removes a players admin data. This is not saved to "configs/admins.json"
         /// </summary>
-        /// <param name="steamid">Steam ID remove admin data from.</param>
-        public static void RemovePlayerAdminData(SteamID steamID)
+        /// <param name="steamId">Steam ID remove admin data from.</param>
+        public static void RemovePlayerAdminData(SteamID steamId)
         {
-            if (_admins.ContainsKey(steamID.SteamId64)) _admins.Remove(steamID.SteamId64);
-            return;
+            Admins.Remove(steamId);
         }
     }
 }

@@ -60,6 +60,26 @@ namespace CounterStrikeSharp.API.Modules.Entities
             if (obj.GetType() != this.GetType()) return false;
             return Equals((SteamID)obj);
         }
+        
+        public static bool TryParse(string s, out SteamID? steamId)
+        {
+            try
+            {
+                if (ulong.TryParse(s, out var steamid64))
+                {
+                    steamId = new SteamID(steamid64);
+                    return true;
+                }
+
+                steamId = new SteamID(s);
+                return true;
+            }
+            catch
+            {
+                steamId = null;
+                return false;
+            }
+        }
 
         public override int GetHashCode()
         {
