@@ -58,9 +58,9 @@ namespace CounterStrikeSharp.API.Modules.Admin
                     return;
                 }
                 
-                var adminsFromFile = JsonSerializer.Deserialize<AdminData[]>(File.ReadAllText(adminDataPath));
+                var adminsFromFile = JsonSerializer.Deserialize<Dictionary<string, AdminData>>(File.ReadAllText(adminDataPath), new JsonSerializerOptions() { ReadCommentHandling = JsonCommentHandling.Skip });
                 if (adminsFromFile == null) { throw new FileNotFoundException(); }
-                foreach (var adminDef in adminsFromFile)
+                foreach (var adminDef in adminsFromFile.Values)
                 {
                     if (SteamID.TryParse(adminDef.Identity, out var steamId))
                     {
